@@ -1,5 +1,6 @@
 #!/bin/sh
-# Ollama sunucusunu baslat, model yoksa otomatik indir.
+# Start Ollama; pull default model if OLLAMA_PULL_MODEL is set.
+# File must use LF line endings (not CRLF) — see .gitattributes.
 
 ollama serve &
 SERVER_PID=$!
@@ -12,4 +13,4 @@ if [ -n "$OLLAMA_PULL_MODEL" ]; then
     ollama pull "$OLLAMA_PULL_MODEL"
 fi
 
-wait $SERVER_PID
+wait "$SERVER_PID"

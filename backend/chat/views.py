@@ -1,10 +1,12 @@
 import json
+import logging
 import os
 import re
 import socket
 import urllib.error
 import urllib.request
 import uuid
+from typing import Any
 
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
@@ -16,6 +18,8 @@ from pgvector.django import CosineDistance
 from .models import ChatMessage, ChatSession
 from core.embeddings import embed_query
 from core.models import DocumentChunk
+
+logger = logging.getLogger(__name__)
 
 LLM_BACKEND = os.environ.get("LLM_BACKEND", "ollama")
 RAG_MAX_CHARS = 2000
@@ -45,8 +49,14 @@ OLLAMA_NUM_PREDICT = int(os.environ.get("OLLAMA_NUM_PREDICT", "256"))
 OLLAMA_NUM_CTX = int(os.environ.get("OLLAMA_NUM_CTX", "4096"))
 OLLAMA_HTTP_TIMEOUT = int(os.environ.get("OLLAMA_HTTP_TIMEOUT", "240"))
 OLLAMA_KEEP_ALIVE = os.environ.get("OLLAMA_KEEP_ALIVE", "30m")
-OLLAMA_TEMPERATURE = float(os.environ.get("OLLAMA_TEMPERATURE", "0.15"))
+OLLAMA_TEMPERATURE = float(
+    os.environ.get(
+        "OLLAMA_TEMPERATURE",
+        "0" if "phi" in OLLAMA_MODEL.lower() else "0.15",
+    )
+)
 OLLAMA_TOP_P = float(os.environ.get("OLLAMA_TOP_P", "0.85"))
+OLLAMA_REPEAT_PENALTY = float(os.environ.get("OLLAMA_REPEAT_PENALTY", "1.12"))
 # Long threads exceed Ollama num_ctx; the model then drops early tokens (system+RAG) and
 # falls back to generic "as an AI / 2023" disclaimers despite crawled Context.
 CHAT_HISTORY_MAX_MESSAGES = max(1, int(os.environ.get("CHAT_HISTORY_MAX_MESSAGES", "12")))
@@ -55,6 +65,46 @@ CHAT_MESSAGE_MAX_CHARS = max(200, int(os.environ.get("CHAT_MESSAGE_MAX_CHARS", "
 # Claude API settings
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
+
+RAG_FALLBACK_REPLY = (
+    "I don't have that information in the crawled pages. Try running a data refresh or rephrase your question."
+)
+
+# Tiny local models often refuse or ramble on bare "hi" when RAG snippets are unrelated.
+GREETING_REPLY = (
+    "Hello. I'm the ACU website assistant for Acıbadem Mehmet Ali Aydınlar University. "
+    "Ask me about programs, admissions, or the campus in English—I answer using the official website content."
+)
+
+_BARE_GREETING_RE = re.compile(
+    r"^\s*(hi|hello|hey|hallo|yo|merhaba|selam|good\s+(morning|afternoon|evening))\b[\s!?.…]*$",
+    re.I,
+)
+
+
+def _bare_greeting_reply(plain_user: str) -> str | None:
+    s = (plain_user or "").strip()
+    if not s or len(s) > 48:
+        return None
+    if _BARE_GREETING_RE.match(s):
+        return GREETING_REPLY
+    return None
+
+
+def _greeting_rag_meta() -> dict:
+    return {
+        "embedding_ok": True,
+        "chunks_used": 0,
+        "relaxed_retrieval": False,
+        "sources": [],
+        "rag_query_preview": "",
+        "skipped_llm": "bare_greeting",
+        "context_chars_sent": 0,
+        "llm_user_turn_chars": len(GREETING_REPLY),
+        "context_block_in_llm": False,
+        "indexed_chunks_in_db": DocumentChunk.objects.count(),  # pyright: ignore[reportAttributeAccessIssue]
+    }
+
 
 SYSTEM_BASE = (
     "You are the official website assistant for Acıbadem Mehmet Ali Aydınlar University (ACU). "
@@ -66,7 +116,7 @@ SYSTEM_BASE = (
     "public university contact data—state them when the user asks; do not refuse as \"private\". "
     "Do not mention OpenAI, Anthropic, Microsoft, training data, or content policies. "
     "If Context is missing or does not contain the answer, reply exactly: "
-    "\"I don't have that information in the crawled pages. Try running a data refresh or rephrase your question.\" "
+    f"\"{RAG_FALLBACK_REPLY}\" "
     "If the question is out of scope for the website content, say so in one sentence."
 )
 
@@ -84,7 +134,7 @@ SYSTEM_RAG_USER_WRAPPER = (
     "(4) Never say you are from Microsoft/OpenAI/Anthropic; never mention training data, browsing "
     "the live web, or a knowledge cutoff year. "
     "(5) If ===QUESTION=== asks for anything not clearly answered in ===CONTEXT===, reply exactly: "
-    "\"I don't have that information in the crawled pages. Try running a data refresh or rephrase your question.\""
+    f"\"{RAG_FALLBACK_REPLY}\""
 )
 RAG_USER_BUBBLE_MAX_CHARS = max(2000, int(os.environ.get("RAG_USER_BUBBLE_MAX_CHARS", "4500")))
 
@@ -155,11 +205,11 @@ def _search_pages_with_meta(query: str) -> tuple[str, list[dict], bool, bool]:
         return "", [], False, False
 
     base_qs = (
-        DocumentChunk.objects.annotate(distance=CosineDistance("embedding", query_vector))
+        DocumentChunk.objects.annotate(distance=CosineDistance("embedding", query_vector))  # pyright: ignore[reportAttributeAccessIssue]
         .order_by("distance")
     )
 
-    has_rows = DocumentChunk.objects.exists()
+    has_rows = DocumentChunk.objects.exists()  # pyright: ignore[reportAttributeAccessIssue]
     used_relaxed = False
     if RAG_RELAX_ON_EMPTY and has_rows:
         vector_chunks = list(base_qs.filter(distance__lte=RAG_MAX_DISTANCE)[:RAG_TOP_K])
@@ -180,7 +230,7 @@ def _search_pages_with_meta(query: str) -> tuple[str, list[dict], bool, bool]:
 
     if RAG_KEYWORD_BOOST and has_rows:
         for term in _rag_keywords_from_query(query):
-            for ch in DocumentChunk.objects.filter(content__icontains=term)[:3]:
+            for ch in DocumentChunk.objects.filter(content__icontains=term)[:3]:  # pyright: ignore[reportAttributeAccessIssue]
                 pk = ch.pk
                 if pk not in seen_pk:
                     seen_pk.add(pk)
@@ -238,7 +288,7 @@ def _wrap_user_with_rag_context(context: str, user_plain: str) -> str:
 
 def _attach_llm_visibility_meta(meta: dict, user_llm: str, context_char_count: int) -> dict:
     """Prove to the client whether crawled text was actually placed in the prompt."""
-    meta["indexed_chunks_in_db"] = DocumentChunk.objects.count()
+    meta["indexed_chunks_in_db"] = DocumentChunk.objects.count()  # pyright: ignore[reportAttributeAccessIssue]
     meta["context_chars_sent"] = context_char_count
     meta["llm_user_turn_chars"] = len(user_llm)
     meta["context_block_in_llm"] = bool(
@@ -328,6 +378,122 @@ def _trim_message_for_llm(text: str, max_chars: int = CHAT_MESSAGE_MAX_CHARS) ->
     return t[: max_chars - 1] + "…"
 
 
+def _strip_common_model_prefixes(text: str) -> str:
+    t = (text or "").strip()
+    for p in ("<|assistant|>", "<|assistant|", "<|end|>", "Assistant:", "assistant:"):
+        if t.startswith(p):
+            t = t[len(p) :].lstrip()
+    return t
+
+
+_GARBLED_LINE_PATTERNS = (
+    re.compile(r"^\s*rewrite[-\s]?craft", re.I | re.M),
+    re.compile(r"i'?s_assistant", re.I),
+    re.compile(r"^\s*[a-z]\)\s+i'?s_", re.I | re.M),
+    re.compile(r"arempact", re.I),
+    re.compile(r"you\s+are\s*mpact", re.I),
+    re.compile(r"you\s+diffusion", re.I),
+    re.compile(r"diffusion\s*,\s*your\s+task", re.I),
+    re.compile(r"patiently\s*/\s*suggest", re.I),
+    re.compile(r"\bas\s+anf\b", re.I),
+)
+
+
+def _is_garbled_assistant_reply(text: str) -> bool:
+    """Heuristic: tiny models (esp. phi3:mini) sometimes dump exam or training templates."""
+    t = _strip_common_model_prefixes(text)
+    if len(t) < 12:
+        return True
+    low = t.lower()
+    needles = (
+        "instruction prompting",
+        "python programming",
+        "documentary filmography",
+        "environmental sustainability in rural",
+        "promise, i's",
+        "i's a)",
+        "question: chat",
+        "\nquestion:",
+        "a) = [",
+        "b) = [",
+        "chat \n- promise",
+        "as an ai language model",
+        "based on your training",
+        "rewrite-craft",
+        "rewrite craft",
+        "i's_assistant",
+        "i apologize for your task",
+        "apologize for your task",
+        "craft a)",
+        "mpactedd",
+        "you arempact",
+        "_assistant:",
+        "assistant: i apologize",
+        "you diffusion",
+        "diffusion, your task",
+        "diffusion, your",
+        "patiently/suggestion",
+        "patiently/suggest",
+        "as anf",
+        "your task:",
+        "a patiently",
+        "needle-ai",
+        "needle-a",
+    )
+    if any(n in low for n in needles):
+        return True
+    for rx in _GARBLED_LINE_PATTERNS:
+        if rx.search(t):
+            return True
+    head = low[:200]
+    if head.startswith("input:") and "question:" in head:
+        return True
+    if re.match(r"^\s*rewrite[-\s]", low) or re.match(r"^\s*[a-z]\)\s+", low):
+        if "acibadem" not in low and "acu" not in low and "university" not in low:
+            return True
+    if re.match(r"^\s*you\s+[A-Za-z]+,?\s+your\s+task\s*:", low):
+        if "acibadem" not in low and "istanbul" not in low:
+            return True
+    return False
+
+
+def _last_user_content(messages: list) -> str:
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            return (m.get("content") or "").strip()
+    return ""
+
+
+def _rag_user_turn_has_context(user_content: str) -> bool:
+    c = user_content or ""
+    if "===CONTEXT===" not in c or "===QUESTION===" not in c:
+        return False
+    mid = c.split("===CONTEXT===", 1)[1].split("===QUESTION===", 1)[0].strip()
+    return len(mid) > 80
+
+
+def _extractive_reply_from_context_user_message(user_content: str) -> str | None:
+    if not _rag_user_turn_has_context(user_content):
+        return None
+    mid = user_content.split("===CONTEXT===", 1)[1].split("===QUESTION===", 1)[0].strip()
+    if len(mid) < 40:
+        return None
+    clip = mid[:750].rsplit(" ", 1)[0] + ("…" if len(mid) > 750 else "")
+    return (
+        "Here is what the crawled ACU website pages say (verbatim excerpt): "
+        + clip
+    )
+
+
+def _phi3_slim_messages(ollama_messages: list) -> list:
+    """Drop chat history; Phi-3 often derails with long multi-turn + RAG."""
+    sys_m = next((m for m in ollama_messages if m.get("role") == "system"), None)
+    user_m = next((m for m in reversed(ollama_messages) if m.get("role") == "user"), None)
+    if not sys_m or not user_m:
+        return ollama_messages
+    return [dict(sys_m), dict(user_m)]
+
+
 def _parse_client_id(raw: str | None):
     if not raw:
         return None
@@ -384,19 +550,29 @@ def _call_claude(messages: list) -> tuple[str | None, str | None]:
     return reply, None
 
 
-def _call_ollama(ollama_messages: list) -> tuple[str | None, str | None]:
+def _call_ollama(
+    ollama_messages: list,
+    option_overrides: dict[str, Any] | None = None,
+    *,
+    _attempt: int = 0,
+) -> tuple[str | None, str | None]:
+    opts: dict[str, Any] = {
+        "num_predict": OLLAMA_NUM_PREDICT,
+        "num_ctx": OLLAMA_NUM_CTX,
+        "temperature": OLLAMA_TEMPERATURE,
+        "top_p": OLLAMA_TOP_P,
+        "repeat_penalty": OLLAMA_REPEAT_PENALTY,
+    }
+    if option_overrides:
+        opts.update(option_overrides)
+
     payload = json.dumps(
         {
             "model": OLLAMA_MODEL,
             "messages": ollama_messages,
             "stream": False,
             "keep_alive": OLLAMA_KEEP_ALIVE,
-            "options": {
-                "num_predict": OLLAMA_NUM_PREDICT,
-                "num_ctx": OLLAMA_NUM_CTX,
-                "temperature": OLLAMA_TEMPERATURE,
-                "top_p": OLLAMA_TOP_P,
-            },
+            "options": opts,
         }
     ).encode("utf-8")
 
@@ -407,9 +583,18 @@ def _call_ollama(ollama_messages: list) -> tuple[str | None, str | None]:
         method="POST",
     )
 
+    raw_body = ""
     try:
         with urllib.request.urlopen(req, timeout=OLLAMA_HTTP_TIMEOUT) as resp:
-            data = json.loads(resp.read().decode())
+            raw_body = resp.read().decode()
+            data = json.loads(raw_body)
+    except json.JSONDecodeError:
+        logger.warning(
+            "Ollama returned non-JSON body (first 300 chars): %r", raw_body[:300]
+        )
+        return None, (
+            "Ollama geçersiz yanıt döndü (JSON değil). OLLAMA_MODEL ve Ollama günlüğünü kontrol edin."
+        )
     except urllib.error.HTTPError as e:
         detail = e.read().decode(errors="replace")
         return None, detail or e.reason
@@ -424,15 +609,52 @@ def _call_ollama(ollama_messages: list) -> tuple[str | None, str | None]:
     except socket.timeout:
         return None, "Ollama zaman aşımı (socket). Sunucu veya model çok yavaş."
 
-    reply = (data.get("message") or {}).get("content", "").strip()
+    reply = _strip_common_model_prefixes(
+        (data.get("message") or {}).get("content", "")
+    )
     if not reply:
         return None, "Empty model response"
+
+    if _is_garbled_assistant_reply(reply):
+        if _attempt == 0:
+            logger.warning("Ollama reply looks corrupted; retry with temperature=0")
+            return _call_ollama(
+                ollama_messages,
+                {"temperature": 0.0, "top_p": 0.85},
+                _attempt=1,
+            )
+        if _attempt == 1 and "phi" in OLLAMA_MODEL.lower():
+            slim = _phi3_slim_messages(ollama_messages)
+            if slim != ollama_messages:
+                logger.warning(
+                    "Ollama still garbled; retry with slim context (no chat history)"
+                )
+                return _call_ollama(
+                    slim,
+                    {
+                        "temperature": 0.0,
+                        "top_p": 0.75,
+                        "repeat_penalty": min(1.25, OLLAMA_REPEAT_PENALTY + 0.06),
+                    },
+                    _attempt=2,
+                )
+        logger.warning("Ollama reply still corrupted; trying extractive RAG reply")
+        ext = _extractive_reply_from_context_user_message(
+            _last_user_content(ollama_messages)
+        )
+        if ext:
+            return ext, None
+        return RAG_FALLBACK_REPLY, None
+
     return reply, None
 
 
 def _call_llm(messages: list) -> tuple[str | None, str | None]:
     if LLM_BACKEND == "claude" and ANTHROPIC_API_KEY:
         return _call_claude(messages)
+    u = _last_user_content(messages)
+    if u and "phi" in OLLAMA_MODEL.lower() and not _rag_user_turn_has_context(u):
+        return RAG_FALLBACK_REPLY, None
     return _call_ollama(messages)
 
 
@@ -444,7 +666,7 @@ def list_sessions(request):
     )
     if cid is None:
         return JsonResponse({"error": "client_id gerekli (UUID)"}, status=400)
-    sessions = ChatSession.objects.filter(client_id=cid)[:100]
+    sessions = ChatSession.objects.filter(client_id=cid)[:100]  # pyright: ignore[reportAttributeAccessIssue]
     return JsonResponse(
         {
             "sessions": [
@@ -529,6 +751,10 @@ def chat_completion(request):
         if last_user_idx is None:
             plain_for_rag = user_msg
 
+        gr = _bare_greeting_reply(plain_for_rag)
+        if gr:
+            return JsonResponse({"reply": gr, "rag": _greeting_rag_meta()})
+
         system_text, user_llm, rag_meta = _prepare_chat_prompts(rag_q, plain_for_rag)
         ollama_messages: list = [{"role": "system", "content": system_text}]
         if last_user_idx is None:
@@ -557,6 +783,9 @@ def chat_completion(request):
         message = (body.get("message") or "").strip()
         if not message:
             return JsonResponse({"error": "message or messages is required"}, status=400)
+        gr = _bare_greeting_reply(message)
+        if gr:
+            return JsonResponse({"reply": gr, "rag": _greeting_rag_meta()})
         system_text, user_llm, rag_meta = _prepare_chat_prompts(rag_q, message)
         ollama_messages = [
             {"role": "system", "content": system_text},
@@ -583,9 +812,26 @@ def _chat_with_db(request, body: dict, client_uuid: uuid.UUID) -> JsonResponse:
             return JsonResponse({"error": "session_id geçersiz UUID"}, status=400)
         session = get_object_or_404(ChatSession, pk=sid, client_id=client_uuid)
     else:
-        session = ChatSession.objects.create(client_id=client_uuid, title="Yeni sohbet")
+        session = ChatSession.objects.create(client_id=client_uuid, title="Yeni sohbet")  # pyright: ignore[reportAttributeAccessIssue]
 
     prior = list(session.messages.all())
+    gr = _bare_greeting_reply(message)
+    if gr:
+        ChatMessage.objects.create(session=session, role="user", content=message)  # pyright: ignore[reportAttributeAccessIssue]
+        if session.title == "Yeni sohbet" and len(prior) == 0:
+            session.title = message[:197] + ("…" if len(message) > 200 else "")
+            session.save(update_fields=["title"])
+        ChatMessage.objects.create(session=session, role="assistant", content=gr)  # pyright: ignore[reportAttributeAccessIssue]
+        session.save()
+        return JsonResponse(
+            {
+                "reply": gr,
+                "session_id": str(session.id),
+                "title": session.title,
+                "rag": _greeting_rag_meta(),
+            }
+        )
+
     prior_user_texts = [m.content for m in prior if m.role == "user"]
     rag_q = _compose_rag_search_query(message, prior_user_texts)
     system_text, user_llm, rag_meta = _prepare_chat_prompts(rag_q, message)
@@ -603,7 +849,7 @@ def _chat_with_db(request, body: dict, client_uuid: uuid.UUID) -> JsonResponse:
         {"role": "user", "content": _trim_last_user_for_llm(user_llm)}
     )
 
-    user_row = ChatMessage.objects.create(
+    user_row = ChatMessage.objects.create(  # pyright: ignore[reportAttributeAccessIssue]
         session=session, role="user", content=message
     )
     title_changed = False
@@ -624,7 +870,7 @@ def _chat_with_db(request, body: dict, client_uuid: uuid.UUID) -> JsonResponse:
             status=status,
         )
 
-    ChatMessage.objects.create(session=session, role="assistant", content=reply_text)
+    ChatMessage.objects.create(session=session, role="assistant", content=reply_text)  # pyright: ignore[reportAttributeAccessIssue]
     session.save()
 
     return JsonResponse(
