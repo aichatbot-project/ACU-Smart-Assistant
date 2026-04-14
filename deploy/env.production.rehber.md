@@ -1,0 +1,21 @@
+```env
+# .env.production
+DEBUG=False
+SECRET_KEY=mHBHn3NIsiu9XOSp4lOJrrFGTaH41Qz_GFtrx8thZz6UxT9E7ZWO3tEsY5vMYotcBpWkOcSHBnEHHQJbHcuxGg
+ALLOWED_HOSTS=www.acusmartassistant.com.tr,acusmartassistant.com.tr,13.217.122.200
+
+CSRF_TRUSTED_ORIGINS_EXTRA=http://13.217.122.200:8080
+CORS_ALLOWED_ORIGINS_EXTRA=http://13.217.122.200:8080
+
+POSTGRES_DB=acu_chatbot
+POSTGRES_USER=acu
+POSTGRES_PASSWORD=wqiomg_FymtuSm_gC97gUk_RUvIUgakLzFp_LevBJK4
+POSTGRES_PORT=5432
+
+OLLAMA_MODEL=llama3.2:3b
+```
+
+```env
+# .env (proje kökü)
+NEXT_PUBLIC_API_URL=http://13.217.122.200:8080
+```

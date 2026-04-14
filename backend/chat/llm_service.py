@@ -1,15 +1,19 @@
 import json
+import logging
 import os
 import re
 import socket
+import time
 import urllib.error
 import urllib.request
+
+logger = logging.getLogger("chat.llm")
 
 LLM_BACKEND = os.environ.get("LLM_BACKEND", "ollama")
 OLLAMA_BASE = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.2:3b")
-# Lower defaults = faster on CPU; override via env for longer answers / more context.
-OLLAMA_NUM_PREDICT = int(os.environ.get("OLLAMA_NUM_PREDICT", "256"))
+# Lower defaults = faster on CPU; team default 200 predict / 4096 ctx (override via env).
+OLLAMA_NUM_PREDICT = int(os.environ.get("OLLAMA_NUM_PREDICT", "200"))
 OLLAMA_NUM_CTX = int(os.environ.get("OLLAMA_NUM_CTX", "4096"))
 OLLAMA_HTTP_TIMEOUT = int(os.environ.get("OLLAMA_HTTP_TIMEOUT", "240"))
 OLLAMA_KEEP_ALIVE = os.environ.get("OLLAMA_KEEP_ALIVE", "30m")
@@ -74,9 +78,11 @@ def _call_claude(messages: list) -> tuple[str | None, str | None]:
             data = json.loads(resp.read().decode())
     except urllib.error.HTTPError as e:
         detail = e.read().decode(errors="replace")
-        return None, f"Claude API error: {detail}"
+        logger.error("Claude API HTTP %d: %s", e.code, detail[:500])
+        return None, "Claude API error. Please try again later."
     except urllib.error.URLError as e:
-        return None, f"Claude API connection error: {e.reason}"
+        logger.error("Claude API connection error: %s", e.reason)
+        return None, "Claude API is unreachable. Please try again later."
 
     content_blocks = data.get("content", [])
     reply = ""
@@ -115,17 +121,17 @@ def _call_ollama(ollama_messages: list) -> tuple[str | None, str | None]:
             data = json.loads(resp.read().decode())
     except urllib.error.HTTPError as e:
         detail = e.read().decode(errors="replace")
-        return None, detail or e.reason
+        logger.error("Ollama HTTP %d: %s", e.code, detail[:500])
+        return None, "LLM service error. Please try again later."
     except urllib.error.URLError as e:
         err = str(e.reason)
+        logger.error("Ollama connection error: %s", err)
         if isinstance(e.reason, TimeoutError) or "timed out" in err.lower():
-            return None, (
-                "Ollama response timed out. Try increasing Docker RAM, lowering "
-                "OLLAMA_NUM_PREDICT, or using a smaller model."
-            )
-        return None, err
+            return None, "Response timed out. Please try again."
+        return None, "LLM service is unreachable. Please try again later."
     except socket.timeout:
-        return None, "Ollama socket timeout. The server or model may be too slow."
+        logger.error("Ollama socket timeout")
+        return None, "Response timed out. Please try again."
 
     reply = (data.get("message") or {}).get("content", "").strip()
     if not reply:
@@ -134,10 +140,22 @@ def _call_ollama(ollama_messages: list) -> tuple[str | None, str | None]:
 
 
 def call_llm(messages: list) -> tuple[str | None, str | None]:
-    if LLM_BACKEND == "claude" and ANTHROPIC_API_KEY:
+    backend = "claude" if (LLM_BACKEND == "claude" and ANTHROPIC_API_KEY) else "ollama"
+    logger.info("LLM call: backend=%s, messages=%d", backend, len(messages))
+    start = time.time()
+
+    if backend == "claude":
         reply, err = _call_claude(messages)
     else:
         reply, err = _call_ollama(messages)
-    if err or not reply:
+
+    elapsed = round(time.time() - start, 2)
+    if err:
+        logger.warning("LLM error: backend=%s, elapsed=%.2fs, error=%s", backend, elapsed, err[:200])
         return reply, err
+    if not reply:
+        logger.warning("LLM empty response: backend=%s, elapsed=%.2fs", backend, elapsed)
+        return reply, err
+
+    logger.info("LLM reply: backend=%s, elapsed=%.2fs, chars=%d", backend, elapsed, len(reply))
     return _sanitize_assistant_reply(reply), None

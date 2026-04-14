@@ -49,8 +49,6 @@ def run_chat_completion(body: dict) -> JsonResponse:
                 {"error": "messages must include at least one user turn"},
                 status=400,
             )
-        if last_user_idx is None:
-            plain_for_rag = user_msg
 
         system_text, user_llm, rag_meta = prepare_chat_prompts(rag_q, plain_for_rag)
         ollama_messages: list = [{"role": "system", "content": system_text}]
@@ -144,3 +142,5 @@ def _chat_with_db(body: dict, client_uuid: uuid.UUID) -> JsonResponse:
             "rag": rag_meta,
         }
     )
+
+

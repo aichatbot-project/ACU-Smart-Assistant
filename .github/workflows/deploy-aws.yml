@@ -1,0 +1,112 @@
+# AWS ECR + (isteğe bağlı) EC2/ECS. Otomatik tetikleme KAPALI — sadece manuel (workflow_dispatch).
+# Otomatik basit deploy için: deploy-ec2-simple.yml (SSH + sunucuda build).
+#
+# GitHub Secrets:
+#   AWS_ROLE_ARN, AWS_REGION, ECR_REPOSITORY_BACKEND, ECR_REPOSITORY_FRONTEND
+#   EC2’ye otomatik deploy için: SSH_PRIVATE_KEY, EC2_HOST, EC2_USER
+#
+# GitHub Variables:
+#   NEXT_PUBLIC_API_URL (zorunlu, frontend build)
+#   EC2_DEPLOY_PATH — EC2’de proje kökü (ör. /home/ubuntu/Project), SSH deploy için zorunlu
+#   ECS (isteğe bağlı): AWS_ECS_CLUSTER, AWS_ECS_SERVICE_*
+#
+# EC2 önkoşullar: Git repo + .env.production; Docker + Compose v2; AWS CLI; instance role → ECR okuma
+
+name: Deploy (AWS ECR)
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-aws-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Image tag
+        id: tag
+        run: echo "sha=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push images
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          BACKEND_REPO: ${{ secrets.ECR_REPOSITORY_BACKEND }}
+          FRONTEND_REPO: ${{ secrets.ECR_REPOSITORY_FRONTEND }}
+          IMAGE_TAG: ${{ steps.tag.outputs.sha }}
+          NEXT_PUBLIC_API_URL: ${{ vars.NEXT_PUBLIC_API_URL }}
+        run: |
+          set -euo pipefail
+          test -n "${BACKEND_REPO}" && test -n "${FRONTEND_REPO}"
+          : "${NEXT_PUBLIC_API_URL:?Set repo variable NEXT_PUBLIC_API_URL (public API base URL for the browser)}"
+
+          docker build -f backend/Dockerfile.prod -t "${REGISTRY}/${BACKEND_REPO}:${IMAGE_TAG}" -t "${REGISTRY}/${BACKEND_REPO}:latest" backend
+          docker build -f frontend/Dockerfile.prod \
+            --build-arg "NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}" \
+            -t "${REGISTRY}/${FRONTEND_REPO}:${IMAGE_TAG}" -t "${REGISTRY}/${FRONTEND_REPO}:latest" frontend
+
+          docker push "${REGISTRY}/${BACKEND_REPO}:${IMAGE_TAG}"
+          docker push "${REGISTRY}/${BACKEND_REPO}:latest"
+          docker push "${REGISTRY}/${FRONTEND_REPO}:${IMAGE_TAG}"
+          docker push "${REGISTRY}/${FRONTEND_REPO}:latest"
+
+      - name: EC2 — ECR’dan çek ve yeniden başlat
+        if: ${{ secrets.EC2_HOST != '' && secrets.SSH_PRIVATE_KEY != '' && secrets.EC2_USER != '' && vars.EC2_DEPLOY_PATH != '' }}
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/ec2_deploy
+          chmod 600 ~/.ssh/ec2_deploy
+          ssh -i ~/.ssh/ec2_deploy -o StrictHostKeyChecking=accept-new \
+            '${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}' bash -s << 'REMOTE_EOF'
+          set -euo pipefail
+          export REGISTRY='${{ steps.ecr.outputs.registry }}'
+          export BACKEND_REPO='${{ secrets.ECR_REPOSITORY_BACKEND }}'
+          export FRONTEND_REPO='${{ secrets.ECR_REPOSITORY_FRONTEND }}'
+          export IMAGE_TAG='${{ steps.tag.outputs.sha }}'
+          export AWS_REGION='${{ secrets.AWS_REGION }}'
+          cd '${{ vars.EC2_DEPLOY_PATH }}'
+          export BACKEND_IMAGE="${REGISTRY}/${BACKEND_REPO}:${IMAGE_TAG}"
+          export FRONTEND_IMAGE="${REGISTRY}/${FRONTEND_REPO}:${IMAGE_TAG}"
+          aws ecr get-login-password --region "${AWS_REGION}" \
+            | docker login --username AWS --password-stdin "${REGISTRY}"
+          docker compose -f docker-compose.ec2.yml pull backend frontend
+          docker compose -f docker-compose.ec2.yml up -d --remove-orphans
+          REMOTE_EOF
+
+      - name: Rolling restart ECS (backend)
+        if: ${{ vars.AWS_ECS_CLUSTER != '' && vars.AWS_ECS_SERVICE_BACKEND != '' }}
+        run: |
+          aws ecs update-service \
+            --cluster "${{ vars.AWS_ECS_CLUSTER }}" \
+            --service "${{ vars.AWS_ECS_SERVICE_BACKEND }}" \
+            --force-new-deployment
+
+      - name: Rolling restart ECS (frontend)
+        if: ${{ vars.AWS_ECS_CLUSTER != '' && vars.AWS_ECS_SERVICE_FRONTEND != '' }}
+        run: |
+          aws ecs update-service \
+            --cluster "${{ vars.AWS_ECS_CLUSTER }}" \
+            --service "${{ vars.AWS_ECS_SERVICE_FRONTEND }}" \
+            --force-new-deployment

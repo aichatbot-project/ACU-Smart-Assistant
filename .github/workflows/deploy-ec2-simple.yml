@@ -1,0 +1,65 @@
+# Basit otomatik deploy: AWS ECR / IAM GEREKTIRMEZ.
+#
+# main’e push → CI yeşil olunca EC2’ye SSH ile bağlanır; git pull + docker compose --build.
+#
+# GitHub Secrets: SSH_PRIVATE_KEY, EC2_HOST, EC2_USER
+# GitHub Variables: EC2_DEPLOY_PATH  (örn. /home/ubuntu/Project — bu klasörde git clone olmalı)
+#
+# EC2’de bir kez: repoyu klonla, .env.production + kökte .env (NEXT_PUBLIC_API_URL için) koy,
+# özel repoda git pull için deploy key veya erişim ayarla.
+
+name: Deploy EC2 (basit — SSH)
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+concurrency:
+  group: deploy-ec2-simple
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    if: |
+      github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'workflow_run'
+          && github.event.workflow_run.conclusion == 'success'
+          && github.event.workflow_run.event == 'push')
+
+    steps:
+      - name: Secret / variable kontrolü
+        env:
+          _H: ${{ secrets.EC2_HOST }}
+          _U: ${{ secrets.EC2_USER }}
+          _K: ${{ secrets.SSH_PRIVATE_KEY }}
+          _P: ${{ vars.EC2_DEPLOY_PATH }}
+        run: |
+          test -n "$_H" || { echo "::error::Secret EC2_HOST eksik"; exit 1; }
+          test -n "$_U" || { echo "::error::Secret EC2_USER eksik"; exit 1; }
+          test -n "$_K" || { echo "::error::Secret SSH_PRIVATE_KEY eksik"; exit 1; }
+          test -n "$_P" || { echo "::error::Variable EC2_DEPLOY_PATH eksik (örn. /home/ubuntu/Project)"; exit 1; }
+
+      - name: EC2 — git pull ve docker compose
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/ec2_deploy
+          chmod 600 ~/.ssh/ec2_deploy
+          ssh -i ~/.ssh/ec2_deploy -o StrictHostKeyChecking=accept-new \
+            '${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}' bash -s << 'REMOTE_EOF'
+          set -euo pipefail
+          cd '${{ vars.EC2_DEPLOY_PATH }}'
+          git fetch origin main
+          git reset --hard origin/main
+          docker compose -f docker-compose.prod.yml up -d --build
+          REMOTE_EOF

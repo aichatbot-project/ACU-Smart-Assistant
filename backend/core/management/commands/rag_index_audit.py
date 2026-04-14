@@ -5,7 +5,7 @@ Summarize crawl + chunk index state (scope, defaults) for RAG debugging.
 from django.core.management.base import BaseCommand
 from django.db.models import Avg, Count
 
-from core.management.commands.scrape_acibadem import DEFAULT_SEEDS, MAX_CONTENT_CHARS
+from core.management.commands.scrape_acibadem import DEFAULT_SEEDS
 from core.models import DocumentChunk, Page
 
 
@@ -52,7 +52,9 @@ class Command(BaseCommand):
         self.stdout.write(
             "Default --max-pages=40, --depth=2, English paths only unless --allow-non-english"
         )
-        self.stdout.write(f"MAX_CONTENT_CHARS stored per page (trim): {MAX_CONTENT_CHARS}")
+        self.stdout.write(
+            "Page content trim: no explicit MAX_CONTENT_CHARS constant in current scraper."
+        )
 
         self.stdout.write("")
         self.stdout.write(self.style.NOTICE("=== build_page_embeddings defaults ==="))

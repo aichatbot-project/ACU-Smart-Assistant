@@ -49,3 +49,18 @@ body {
   color: var(--foreground);
   font-family: var(--font-geist-sans), system-ui, sans-serif;
 }
+
+.chat-input::-webkit-outer-spin-button,
+.chat-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.chat-input {
+  -ms-overflow-style: none; /* IE and old Edge */
+  scrollbar-width: none; /* Firefox */
+}
+
+.chat-input::-webkit-scrollbar {
+  display: none; /* Chrome, Safari, Opera */
+}

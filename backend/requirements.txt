@@ -1,4 +1,4 @@
-# CPU-only PyTorch — default pip CUDA/NVIDIA wheels are multi-GB and often fill small EC2 disks.
+# CPU-only PyTorch — default pip CUDA/NVIDIA wheels are multi-GB; aarch64 Docker uses +cpu wheels.
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.6.0+cpu
 

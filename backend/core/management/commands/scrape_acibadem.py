@@ -1,6 +1,5 @@
 # pyright: reportMissingModuleSource=false
 """Fetch pages from acibadem.edu.tr into core.Page."""
-import re
 import time
 from collections import deque
 from urllib.parse import urldefrag, urljoin, urlparse
@@ -11,11 +10,15 @@ import requests
 from bs4 import BeautifulSoup
 from django.core.management.base import BaseCommand
 
+from core.html_extract import extract_title_and_text
 from core.models import Page
 
 SOURCE_LABEL = "acibadem.edu.tr"
 DEFAULT_SEEDS = (
     "https://www.acibadem.edu.tr/en",
+    "https://www.acibadem.edu.tr/en/node",
+    "https://www.acibadem.edu.tr/en/news",
+    "https://www.acibadem.edu.tr/en/announcements",
     # Registration contact/transport — often not reached within default depth/page limits from home alone.
     "https://www.acibadem.edu.tr/en/kayit/iletisim/ulasim",
     "https://www.acibadem.edu.tr/en/academic/undergraduate-programs/faculty-of-engineering-and-natural-sciences/departments/computer-engineering/message-from-head-of-department",
@@ -32,7 +35,6 @@ USER_AGENT = (
     "ACU-Smart-Assistant/0.1 (+university project; respectful crawl; contact: student)"
 )
 REQUEST_TIMEOUT = 25
-MAX_CONTENT_CHARS = 5000
 
 
 def is_english_path(path: str) -> bool:
@@ -72,25 +74,6 @@ def same_site(url: str) -> bool:
         return False
 
 
-def extract_title_and_text(html: str) -> tuple[str, str]:
-    soup = BeautifulSoup(html, "lxml")
-    raw_title = ""
-    if soup.title and soup.title.string:
-        raw_title = soup.title.string.strip()
-    for tag in soup(["script", "style", "noscript", "svg"]):
-        tag.decompose()
-    root = soup.find("main") or soup.find("article") or soup.body
-    if root is None:
-        text = ""
-    else:
-        text = root.get_text(separator="\n", strip=True)
-    text = re.sub(r"\n{3,}", "\n\n", text).strip()
-    # Keep DB rows (and later LLM context) bounded.
-    text = text[:MAX_CONTENT_CHARS]
-    title = (raw_title or "")[:500]
-    return title, text
-
-
 def load_robot_parser(base: str) -> RobotFileParser | None:
     robots_url = urljoin(base, "/robots.txt")
     rp = RobotFileParser()
@@ -118,13 +101,19 @@ class Command(BaseCommand):
             "--max-pages",
             type=int,
             default=40,
-            help="Maximum pages to fetch when --crawl is set (default: 40).",
+            help=(
+                "Max pages to fetch with --crawl (default: 40). Use 0 for no cap "
+                "(until the same-site /en queue is empty; respects robots)."
+            ),
         )
         parser.add_argument(
             "--depth",
             type=int,
             default=2,
-            help="Maximum link hops from seeds when crawling (default: 2).",
+            help=(
+                "Max link hops from seeds with --crawl (default: 2). Use -1 for no cap. "
+                "Use 0 for seeds only."
+            ),
         )
         parser.add_argument(
             "--delay",
@@ -157,8 +146,15 @@ class Command(BaseCommand):
         delay: float = max(0.0, options["delay"])
         dry_run: bool = options["dry_run"]
         crawl: bool = options["crawl"]
-        max_pages: int = max(1, options["max_pages"])
-        max_depth: int = max(0, options["depth"])
+        raw_max_pages = int(options["max_pages"])
+        unlimited_pages = raw_max_pages == 0
+        max_pages: int = max(1, raw_max_pages) if not unlimited_pages else 0
+        raw_depth = int(options["depth"])
+        max_depth: int | None
+        if raw_depth == -1:
+            max_depth = None
+        else:
+            max_depth = max(0, raw_depth)
         ignore_robots: bool = options["ignore_robots"]
         english_only: bool = not options["allow_non_english"]
 
@@ -189,6 +185,14 @@ class Command(BaseCommand):
             self.stderr.write(style.ERROR("No valid seed URLs."))
             return
 
+        if crawl and (unlimited_pages or max_depth is None):
+            self.stdout.write(
+                style.WARNING(
+                    "Full English crawl: no page/depth cap — runs until the BFS queue is empty "
+                    "(same host, /en/ only unless --allow-non-english). May take a long time."
+                )
+            )
+
         if crawl:
             queue: deque[tuple[str, int]] = deque((u, 0) for u in seeds)
         else:
@@ -198,7 +202,7 @@ class Command(BaseCommand):
         saved = 0
         fetched = 0
 
-        while queue and fetched < max_pages:
+        while queue and (unlimited_pages or fetched < max_pages):
             url, depth = queue.popleft()
             if url in visited:
                 continue
@@ -244,7 +248,7 @@ class Command(BaseCommand):
                 saved += 1
                 self.stdout.write(style.SUCCESS(f"Saved: {url}"))
 
-            if not crawl or depth >= max_depth:
+            if not crawl or (max_depth is not None and depth >= max_depth):
                 continue
 
             soup = BeautifulSoup(html, "lxml")

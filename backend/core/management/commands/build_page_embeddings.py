@@ -44,6 +44,14 @@ class Command(BaseCommand):
                 batch_chunks = chunks[i : i + batch_size]
                 vectors = embed_texts(batch_chunks)
                 for text, vector in zip(batch_chunks, vectors):
+                    if vector is None:
+                        self.stderr.write(
+                            self.style.WARNING(
+                                f"Skipping chunk {chunk_index} of page={page.id}: embedding failed"
+                            )
+                        )
+                        chunk_index += 1
+                        continue
                     created_rows.append(
                         DocumentChunk(
                             page=page,

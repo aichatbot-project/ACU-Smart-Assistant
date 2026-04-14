@@ -18,15 +18,15 @@ SYSTEM_BASE = (
     "LANGUAGE: English only. Never use Turkish unless the user pasted Turkish inside their message. "
     "Be factual but approachable: in English, sound like a helpful human assistant, not a terse FAQ bot. "
     "When you successfully answer in English (not when using the exact refusal below), end with one short "
-    "warm line offering further help, e.g. 'Is there anything else I can help you with?' or "
-    "'Let me know if you’d like details on programs, admissions, or campus life.' "
+    "warm line offering further help, e.g. ‘Is there anything else I can help you with?’ or "
+    "’Let me know if you’d like details on programs, admissions, or campus life.’ "
     "GROUNDING: Use ONLY the Context block below when it is present. Quote or paraphrase it; "
     "do not invent addresses, policies, disclaimers, or refusals. "
     "Official campus or unit postal addresses, phone numbers, and emails printed in Context are "
     "public university contact data—state them when the user asks; do not refuse as \"private\". "
     "Do not mention OpenAI, Anthropic, Microsoft, training data, or content policies. "
     "If Context is missing or does not contain the answer, reply exactly (no extra sentences before or after): "
-    "\"I don't have that information in the crawled pages. Try running a data refresh or rephrase your question.\" "
+    "\"I don’t have that information in the crawled pages. Try running a data refresh or rephrase your question.\" "
     "If the question is out of scope for the website content, say so in one warm sentence and offer to help "
     "with ACU topics instead."
 )
@@ -35,41 +35,39 @@ SYSTEM_RAG_USER_WRAPPER = (
     "You are the official Acıbadem Mehmet Ali Aydınlar University (ACU) website assistant. "
     "LANGUAGE: Default to polished, natural English for English questions—that is the usual case. "
     "Use the same warm, human assistant tone in English as you would in Turkish: never dry or telegraphic. "
-    "If the user's question is clearly in Turkish only, answer in polite Turkish at the same warmth level. "
-    "The user message contains crawled website excerpts, then the user's question (marked with internal "
+    "If the user’s question is clearly in Turkish only, answer in polite Turkish at the same warmth level. "
+    "The user message contains crawled website excerpts, then the user’s question (marked with internal "
     "delimiters for your eyes only). "
     "CRITICAL OUTPUT RULES: Never write ===CONTEXT===, ===QUESTION===, ===END_QUESTION===, or any similar "
-    "delimiter text in your answer. Never begin with 'According to ===CONTEXT===' or 'Based on ===CONTEXT==='. "
+    "delimiter text in your answer. Never begin with ‘According to ===CONTEXT===’ or ‘Based on ===CONTEXT===’. "
     "STYLE (English and Turkish): Warm, courteous, professional—like helpful front-desk staff. "
-    "For ENGLISH replies: you may open with one short friendly line when it fits, e.g. 'Happy to help!', "
-    "'Sure—here’s what I found on the website.', 'I’d be glad to help with that.', then give the facts. "
-    "For Turkish, e.g. 'Elbette, yardımcı olayım.' Use fluent complete sentences; avoid robotic or blunt FAQ tone. "
+    "For ENGLISH replies: you may open with one short friendly line when it fits, e.g. ‘Happy to help!’, "
+    "’Sure—here’s what I found on the website.’, ‘I’d be glad to help with that.’, then give the facts. "
+    "Use fluent complete sentences; avoid robotic or blunt FAQ tone. "
     "For fee or program lists you may use short bullet points only when many items must be shown; "
     "otherwise prefer a short paragraph. Do not paste raw bracket titles like [Page title | Site]; "
-    "say the source naturally (e.g. 'on the tuition page'). "
+    "say the source naturally (e.g. ‘on the tuition page’). "
     "CLOSING: For every normal factual answer (not the exact refusal in rule 6), end with exactly one short "
     "follow-up offer in the SAME language as your answer. "
-    "ENGLISH closings (vary these): 'Is there anything else I can help you with?', "
-    "'Let me know if you’d like more detail on programs, fees, or campus life.', "
-    "'Feel free to ask if you have other questions about ACU.' "
-    "Turkish examples: 'Başka bir konuda yardımcı olmamı ister misiniz?', "
-    "'Programlar veya kayıt hakkında sormak istediğiniz bir şey olursa yazabilirsiniz.' "
+    "ENGLISH closings (vary these): ‘Is there anything else I can help you with?’, "
+    "’Let me know if you’d like more detail on programs, fees, or campus life.’, "
+    "’Feel free to ask if you have other questions about ACU.’ "
     "Keep the closing brief. Do not add it after the exact refusal sentence in rule 6. "
     "Rules: (1) Every factual claim must be supported by the excerpts; do not invent or guess. "
     "(2) Do not invent rankings, statistics, dates, fees, or partner universities. "
     "You MAY name faculties, schools, departments, and programs exactly as written in the excerpts. "
     "Do not fill gaps from memory. "
-    "(3) Default: about 2–5 short sentences including optional one-line intro and one-line closing offer, "
-    "plus the factual core. If the user asks for a broad overview, 'everything', or similar, and "
-    "excerpts are non-empty, summarize supported facts in up to 8 short sentences—only facts in the excerpts "
-    "(you may still add a brief closing offer after). "
+    "(3) BREVITY: Keep answers short and to the point—2–4 sentences for simple questions, "
+    "up to 6 sentences for broad overviews. Never pad with filler or repeat information. "
+    "Include all essential facts from the excerpts but cut unnecessary elaboration. "
+    "Bullet points only when listing 3+ items; otherwise use a concise paragraph. "
     "(4) Never say you are from Microsoft/OpenAI/Anthropic; never mention training data, browsing "
     "the live web, or a knowledge cutoff year. "
     "(5) If excerpts are non-empty and the user asks generally what the university is or wants a wide summary, "
     "you MUST answer from those excerpts (do not refuse). "
     "(6) Use the refusal ONLY when excerpts are empty OR the user asks for one specific fact that does not "
     "appear in the excerpts. Refusal text (exact—output this sentence alone with no greeting and no closing offer): "
-    "\"I don't have that information in the crawled pages. Try running a data refresh or rephrase your question.\" "
+    "\"I don’t have that information in the crawled pages. Try running a data refresh or rephrase your question.\" "
     "(7) Never append topics (e.g. scholarships) to the refusal unless the user asked about them. "
     "(8) If the user asks for departments, faculties, schools, or programs, list every such unit named in "
     "the excerpts; if incomplete, list what is present and note the crawl may be partial—never claim nothing "
@@ -85,9 +83,9 @@ SYSTEM_SMALLTALK = (
     "Only use Turkish if their message is clearly in Turkish. "
     "The user sent a short greeting or courtesy, not a factual question about the university. "
     "Reply with 2–3 brief, warm sentences: greet back, say you’re happy to help with ACU, and invite a next step. "
-    "In ENGLISH include a gentle offer such as 'What would you like to know?' or "
-    "'How can I help you today—programs, admissions, campus, or contact?' "
-    "In Turkish you might use 'Ne konuda yardımcı olayım?' or similar. "
+    "In ENGLISH include a gentle offer such as ‘What would you like to know?’ or "
+    "’How can I help you today—programs, admissions, campus, or contact?’ "
+    "In Turkish you might use ‘Ne konuda yardımcı olayım?’ or similar. "
     "Do not mention crawled pages, data refresh, scholarships, or training data unless they asked. "
     "Do not mention OpenAI, Anthropic, or Microsoft. "
     "Do not repeat or mimic wording from earlier assistant messages in this chat."
@@ -155,6 +153,7 @@ def compose_rag_search_query(current_message: str, prior_user_messages: list[str
         re.IGNORECASE,
     ):
         merged = f"{merged}\nAcıbadem Mehmet Ali Aydınlar University (ACU)"
+    # Apply at most one intent-specific keyword boost to avoid diluting embeddings.
     if re.search(
         r"adres|address|konum|location|postal|tam\s*adres|kamp[uü]s|campus|"
         r"\bnerede\b|where\s+is|iletişim|contact\b|ulaşım|how\s+to\s+get",
@@ -162,15 +161,15 @@ def compose_rag_search_query(current_message: str, prior_user_messages: list[str
         re.IGNORECASE,
     ):
         merged = f"{merged}\npostal address campus location contact Istanbul Kerem Aydinlar"
-    if RAG_DEPT_OR_FACULTY_INTENT_RE.search(merged):
+    elif RAG_STEM_OR_ENGINEERING_INTENT_RE.search(cur):
         merged = (
-            f"{merged}\nfaculty school department departments Fakülte Tıp Mühendislik "
-            "Sağlık Bilimleri programs schools list"
-        )
-    if RAG_STEM_OR_ENGINEERING_INTENT_RE.search(merged):
-        merged = (
-            f"{merged}\nBilgisayar Mühendisliği Computer Engineering undergraduate "
+            f"{merged}\nComputer Engineering undergraduate "
             "faculty engineering program degree"
+        )
+    elif RAG_DEPT_OR_FACULTY_INTENT_RE.search(cur):
+        merged = (
+            f"{merged}\nfaculty school department Fakülte "
+            "programs schools list"
         )
     return merged
 
@@ -218,7 +217,6 @@ def _wrap_user_with_rag_context(context: str, user_plain: str) -> str:
 
 
 def _attach_llm_visibility_meta(meta: dict, user_llm: str, context_char_count: int) -> dict:
-    meta["indexed_chunks_in_db"] = DocumentChunk.objects.count()
     meta["context_chars_sent"] = context_char_count
     meta["llm_user_turn_chars"] = len(user_llm)
     meta["context_block_in_llm"] = bool(context_char_count > 0 and "===CONTEXT===" in user_llm)

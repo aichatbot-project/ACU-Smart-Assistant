@@ -9,9 +9,9 @@ Django API, Next.js chat UI, and RAG over crawled university pages using **Postg
 - PostgreSQL **15+** with the **pgvector** extension (Docker image `pgvector/pgvector:pg15` or a local install with `CREATE EXTENSION vector`)
 - Optional: [Ollama](https://ollama.com/) for local LLM inference
 
-## Gelistirme Ortami Kurulumu
+## Geliştirme ortamı kurulumu
 
-Python virtual environment standardi olarak `backend/.venv` kullanin.
+Python sanal ortamı için `backend/.venv` kullanın.
 
 1. Create and activate virtual environment:
 
@@ -89,7 +89,9 @@ Python virtual environment standardi olarak `backend/.venv` kullanin.
    cd frontend && npm run dev
    ```
 
-## Database: two valid setups
+## Database
+
+Pick **one** of the paths below (Docker, bare Postgres, or host-only dev).
 
 ### A) Docker Compose (full stack)
 
@@ -130,6 +132,18 @@ Use this when you run Django and Next.js on the host and only use local services
 6. **Frontend** — Ensure `frontend/.env.local` contains `NEXT_PUBLIC_API_URL=http://localhost:8000`, then `cd frontend && npm install && npm run dev`.
 
 Open the Next.js URL (usually http://localhost:3000). The browser talks to Django on port 8000 via `NEXT_PUBLIC_API_URL`.
+
+## Crawling `acibadem.edu.tr`
+
+[`scrape_acibadem`](backend/core/management/commands/scrape_acibadem.py) uses **requests + BeautifulSoup** by default. If the extracted text is too short (typical for JS-rendered pages such as Bologna-style catalogs), it falls back once to **Selenium** with headless Chrome—so **Chrome or Chromium** must be installed on the machine that runs the command (`selenium` is listed in `backend/requirements.txt`).
+
+Example:
+
+```bash
+cd backend && python manage.py scrape_acibadem --crawl --max-pages 40 --delay 1.5
+```
+
+For end-to-end crawl → chunk → embed, use `refresh_rag` (see Quick start) or the pipeline notes in [RAG_VERI_PIPELINE_REHBERI.md](RAG_VERI_PIPELINE_REHBERI.md).
 
 ## Environment variables
 

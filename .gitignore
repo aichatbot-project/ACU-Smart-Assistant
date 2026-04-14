@@ -132,8 +132,12 @@ celerybeat.pid
 # SageMath parsed files
 *.sage.py
 
+# Django (local collectstatic / build artifact)
+backend/staticfiles/
+
 # Environments
 .env
+.env.production
 .envrc
 .venv
 env/

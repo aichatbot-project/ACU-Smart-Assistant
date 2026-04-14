@@ -1,0 +1,52 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ECRAuthAndPush",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:GetAuthorizationToken"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ECRRepositoryImages",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:CompleteLayerUpload",
+        "ecr:InitiateLayerUpload",
+        "ecr:PutImage",
+        "ecr:UploadLayerPart",
+        "ecr:BatchGetImage",
+        "ecr:GetDownloadUrlForLayer"
+      ],
+      "Resource": [
+        "arn:aws:ecr:YOUR_REGION:YOUR_ACCOUNT_ID:repository/YOUR_BACKEND_REPO",
+        "arn:aws:ecr:YOUR_REGION:YOUR_ACCOUNT_ID:repository/YOUR_FRONTEND_REPO"
+      ]
+    },
+    {
+      "Sid": "ECSDeploy",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:UpdateService",
+        "ecs:DescribeServices",
+        "ecs:DescribeTaskDefinition",
+        "ecs:DescribeTasks",
+        "ecs:ListTasks",
+        "ecs:RunTask"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "PassTaskRoles",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": [
+        "arn:aws:iam::YOUR_ACCOUNT_ID:role/YOUR_ECS_TASK_EXECUTION_ROLE",
+        "arn:aws:iam::YOUR_ACCOUNT_ID:role/YOUR_ECS_TASK_ROLE"
+      ]
+    }
+  ]
+}

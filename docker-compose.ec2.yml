@@ -1,0 +1,99 @@
+# EC2 canlı deploy: backend/frontend imajları ECR’dan çekilir (build yok).
+# GitHub Actions SSH adımı BACKEND_IMAGE ve FRONTEND_IMAGE ortam değişkenlerini export eder.
+# Sunucuda repoda bu dosya + docker-compose.prod.yml ile aynı dizinde olmalı:
+#   .env.production, nginx/nginx.conf, scripts/ollama-entrypoint.sh
+#
+# Manuel test (IAM ile ECR login sonrası):
+#   export BACKEND_IMAGE=123456789.dkr.ecr.../repo:tag
+#   export FRONTEND_IMAGE=...
+#   docker compose -f docker-compose.ec2.yml pull && docker compose -f docker-compose.ec2.yml up -d
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: acu-chatbot-ollama-prod
+    entrypoint: ["/bin/sh", "/ollama-entrypoint.sh"]
+    command: []
+    environment:
+      OLLAMA_PULL_MODEL: ${OLLAMA_MODEL:-llama3.2:3b}
+    volumes:
+      - ollama_data_prod:/root/.ollama
+      - ./scripts/ollama-entrypoint.sh:/ollama-entrypoint.sh:ro
+    ports:
+      - "${OLLAMA_HOST_PORT:-11434}:11434"
+    networks:
+      - acu_prod
+    restart: unless-stopped
+
+  db:
+    image: pgvector/pgvector:pg15
+    container_name: acu-chatbot-db-prod
+    env_file:
+      - .env.production
+    volumes:
+      - pgdata_prod:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - acu_prod
+    restart: unless-stopped
+
+  backend:
+    image: ${BACKEND_IMAGE:?ECR deploy: set BACKEND_IMAGE (full registry/repo:tag)}
+    pull_policy: always
+    container_name: acu-chatbot-backend-prod
+    env_file:
+      - .env.production
+    environment:
+      RUN_MIGRATIONS: ${RUN_MIGRATIONS:-0}
+      POSTGRES_HOST: ${POSTGRES_HOST:-db}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2:3b}
+    expose:
+      - "8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - acu_prod
+
+  frontend:
+    image: ${FRONTEND_IMAGE:?ECR deploy: set FRONTEND_IMAGE}
+    pull_policy: always
+    container_name: acu-chatbot-frontend-prod
+    expose:
+      - "3000"
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - acu_prod
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: acu-chatbot-proxy-prod
+    ports:
+      - "${NGINX_HOST_PORT:-8080}:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - backend
+      - frontend
+    restart: unless-stopped
+    networks:
+      - acu_prod
+
+networks:
+  acu_prod:
+    driver: bridge
+
+volumes:
+  pgdata_prod:
+  ollama_data_prod:

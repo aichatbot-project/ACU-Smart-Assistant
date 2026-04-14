@@ -10,6 +10,7 @@ import unittest
 from collections import deque
 from urllib.parse import urldefrag, urljoin, urlparse
 
+from core.html_extract import extract_title_and_text
 
 # ---------------------------------------------------------------------------
 # Re-implement pure functions locally to avoid Django/pgvector import chain.
@@ -37,7 +38,6 @@ def chunk_text(text, chunk_size=700, chunk_overlap=120):
 
 
 ALLOWED_NETLOCS = frozenset({"acibadem.edu.tr"})
-MAX_CONTENT_CHARS = 5000
 
 
 def is_english_path(path):
@@ -74,25 +74,6 @@ def same_site(url):
         return host in ALLOWED_NETLOCS
     except Exception:
         return False
-
-
-def extract_title_and_text(html):
-    from bs4 import BeautifulSoup
-    soup = BeautifulSoup(html, "lxml")
-    raw_title = ""
-    if soup.title and soup.title.string:
-        raw_title = soup.title.string.strip()
-    for tag in soup(["script", "style", "noscript", "svg"]):
-        tag.decompose()
-    root = soup.find("main") or soup.find("article") or soup.body
-    if root is None:
-        text = ""
-    else:
-        text = root.get_text(separator="\n", strip=True)
-    text = re.sub(r"\n{3,}", "\n\n", text).strip()
-    text = text[:MAX_CONTENT_CHARS]
-    title = (raw_title or "")[:500]
-    return title, text
 
 
 # ---------------------------------------------------------------------------
@@ -280,6 +261,53 @@ class ExtractTitleAndTextTests(unittest.TestCase):
         _, text = extract_title_and_text(html)
         self.assertNotIn("Enable JS", text)
         self.assertIn("Real", text)
+
+
+class NormalizeObsUrlTests(unittest.TestCase):
+    """Tests for OBS Bologna URL normalization (no browser required)."""
+
+    def test_showpac_absolute(self):
+        from core.obs_bologna_scraper import normalize_obs_url
+
+        base = "https://obs.acibadem.edu.tr/oibs/bologna/index.aspx?lang=en"
+        u = normalize_obs_url(
+            "https://obs.acibadem.edu.tr/oibs/bologna/showPac.aspx?code=1",
+            base,
+        )
+        self.assertTrue(u)
+        self.assertIn("showPac", u)
+
+    def test_relative_bologna_path(self):
+        from core.obs_bologna_scraper import normalize_obs_url
+
+        base = "https://obs.acibadem.edu.tr/oibs/bologna/index.aspx?lang=en"
+        u = normalize_obs_url("/oibs/bologna/other.aspx?x=1", base)
+        self.assertTrue(u)
+        self.assertIn("/oibs/bologna/", u)
+
+    def test_rejects_non_obs_host(self):
+        from core.obs_bologna_scraper import normalize_obs_url
+
+        base = "https://obs.acibadem.edu.tr/oibs/bologna/index.aspx?lang=en"
+        self.assertEqual(
+            "", normalize_obs_url("https://example.com/oibs/bologna/x", base)
+        )
+
+    def test_rejects_javascript(self):
+        from core.obs_bologna_scraper import normalize_obs_url
+
+        base = "https://obs.acibadem.edu.tr/oibs/bologna/index.aspx?lang=en"
+        self.assertEqual("", normalize_obs_url("javascript:void(0)", base))
+
+    def test_strips_fragment(self):
+        from core.obs_bologna_scraper import normalize_obs_url
+
+        base = "https://obs.acibadem.edu.tr/oibs/bologna/index.aspx?lang=en"
+        u = normalize_obs_url(
+            "https://obs.acibadem.edu.tr/oibs/bologna/index.aspx?lang=en#foo",
+            base,
+        )
+        self.assertNotIn("#", u)
 
 
 if __name__ == "__main__":

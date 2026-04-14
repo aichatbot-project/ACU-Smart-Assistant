@@ -5,10 +5,15 @@ rerank (word overlap + optional pg_trgm), then char-budget fill.
 
 from __future__ import annotations
 
+import logging
 import re
+import time
 
 from django.db import connection
+from django.db.models import Q
 from pgvector.django import CosineDistance
+
+logger = logging.getLogger("core.rag")
 
 from core.embeddings import embed_texts
 from core.models import DocumentChunk, Page
@@ -36,8 +41,15 @@ from core.rag_keywords import (
 )
 
 
+_pg_trgm_cache: bool | None = None
+
+
 def _pg_trgm_available() -> bool:
+    global _pg_trgm_cache
+    if _pg_trgm_cache is not None:
+        return _pg_trgm_cache
     if connection.vendor != "postgresql":
+        _pg_trgm_cache = False
         return False
     try:
         with connection.cursor() as cursor:
@@ -45,18 +57,15 @@ def _pg_trgm_available() -> bool:
                 "SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm')"
             )
             row = cursor.fetchone()
-            return bool(row and row[0])
+            _pg_trgm_cache = bool(row and row[0])
     except Exception:
-        return False
+        _pg_trgm_cache = False
+    return _pg_trgm_cache
 
 
 def _query_token_set(composed: str, raw_user: str | None) -> set[str]:
     blob = f"{composed} {raw_user or ''}".lower()
-    return {
-        t
-        for t in re.findall(r"[a-zA-ZğüşıöçĞÜŞİÖÇ]{4,}", blob)
-        if len(t) >= 4
-    }
+    return set(re.findall(r"[a-zA-ZğüşıöçĞÜŞİÖÇ]{4,}", blob))
 
 
 def _word_overlap_count(chunk_text: str, tokens: set[str]) -> int:
@@ -66,23 +75,44 @@ def _word_overlap_count(chunk_text: str, tokens: set[str]) -> int:
     return sum(1 for t in tokens if t in low)
 
 
+_DEPT_LEADER_QUERY_RE = re.compile(
+    r"head|chair|director|dean|başkan|baskan|dekan|müdür|mudur",
+    re.IGNORECASE,
+)
+_DEPT_LEADER_CONTENT_RE = re.compile(
+    r"head of department|message from head|department head|chair of|"
+    r"bölüm başkanı|bolum baskan|dekan|müdür",
+    re.IGNORECASE,
+)
+_DEPT_NAMES: list[tuple[str, str]] = [
+    ("computer engineering", "bilgisayar mühendisliği"),
+    ("electrical", "elektrik"),
+    ("electronics", "elektronik"),
+    ("mechanical engineering", "makine mühendisliği"),
+    ("civil engineering", "inşaat mühendisliği"),
+    ("industrial engineering", "endüstri mühendisliği"),
+    ("biomedical engineering", "biyomedikal mühendisliği"),
+    ("software engineering", "yazılım mühendisliği"),
+    ("medicine", "tıp fakültesi"),
+    ("nursing", "hemşirelik"),
+    ("pharmacy", "eczacılık"),
+    ("dentistry", "diş hekimliği"),
+    ("health sciences", "sağlık bilimleri"),
+]
+
+
 def _intent_boost(composed_query: str, url: str, title: str, content: str) -> int:
     q = (composed_query or "").lower()
     blob = f"{url or ''} {title or ''} {content or ''}".lower()
     boost = 0
-    # Specific intent: "who is the head of computer engineering"
-    if ("head" in q or "chair" in q or "director" in q) and (
-        "computer engineering" in q or "bilgisayar mühendisliği" in q
-    ):
-        if (
-            "head of department" in blob
-            or "message from head" in blob
-            or "bölüm başkanı" in blob
-            or "bolum baskan" in blob
-        ):
+    if _DEPT_LEADER_QUERY_RE.search(q):
+        if _DEPT_LEADER_CONTENT_RE.search(blob):
             boost += 8
-        if "computer engineering" in blob or "bilgisayar mühendisliği" in blob:
-            boost += 5
+        for en_name, tr_name in _DEPT_NAMES:
+            if en_name in q or tr_name in q:
+                if en_name in blob or tr_name in blob:
+                    boost += 5
+                break
     return boost
 
 
@@ -98,8 +128,11 @@ def _lexical_fallback_from_chunks(
     if not tokens:
         return "", [], True, False
 
+    max_candidates = max(RAG_TOP_K + RAG_VECTOR_FILL_EXTRA, 40) * 5
     candidates: list[tuple[int, DocumentChunk]] = []
-    for ch in DocumentChunk.objects.all().iterator():
+    for ch in DocumentChunk.objects.only(
+        "pk", "content", "page_title", "source_url"
+    ).iterator(chunk_size=2000):
         score = _word_overlap_count(str(ch.content or ""), tokens)
         score += _word_overlap_count(str(ch.page_title or ""), tokens) * 2
         score += _word_overlap_count(str(ch.source_url or ""), tokens) * 2
@@ -111,6 +144,8 @@ def _lexical_fallback_from_chunks(
         )
         if score > 0:
             candidates.append((score, ch))
+            if len(candidates) >= max_candidates:
+                break
     if not candidates:
         return "", [], True, False
 
@@ -122,40 +157,42 @@ def _lexical_fallback_from_chunks(
     total = 0
     url_counts: dict[str, int] = {}
 
-    # For head/chair questions, prioritize exact department pages from Page rows.
+    # For head/chair/dean questions, prioritize exact department pages from Page rows.
     q = (composed_query or "").lower()
-    if ("head" in q or "chair" in q or "director" in q) and "computer engineering" in q:
-        page_hits: list[Page] = []
-        for p in Page.objects.filter(url__icontains="computer-engineering").iterator():
-            blob = f"{str(p.url or '')} {str(p.content or '')}".lower()
-            if (
-                "message-from-head-of-department" in blob
-                or "head of department" in blob
-                or "bölüm başkanı" in blob
-            ):
-                page_hits.append(p)
-            if len(page_hits) >= 3:
+    if _DEPT_LEADER_QUERY_RE.search(q):
+        url_keyword = None
+        for en_name, tr_name in _DEPT_NAMES:
+            if en_name in q or tr_name in q:
+                url_keyword = en_name.split()[0]  # e.g. "computer", "electrical"
                 break
-        for p in page_hits:
-            if total >= RAG_MAX_CHARS:
-                break
-            u = str(p.url or "")
-            if url_counts.get(u, 0) >= RAG_MAX_CHUNKS_PER_URL:
-                continue
-            snippet = str(p.content or "")[:RAG_SNIPPET_CHARS]
-            if not snippet or total + len(snippet) > RAG_MAX_CHARS:
-                continue
-            title = str(p.title or p.url or "")
-            context_parts.append(f"[{title}]\n{snippet}")
-            total += len(snippet)
-            url_counts[u] = url_counts.get(u, 0) + 1
-            sources.append(
-                {
-                    "url": u,
-                    "title": title[:200],
-                    "cosine_distance": 0.9997,
-                }
-            )
+        if url_keyword:
+            page_hits: list[Page] = []
+            for p in Page.objects.filter(url__icontains=url_keyword).iterator():
+                blob = f"{str(p.url or '')} {str(p.content or '')}".lower()
+                if _DEPT_LEADER_CONTENT_RE.search(blob):
+                    page_hits.append(p)
+                if len(page_hits) >= 3:
+                    break
+            for p in page_hits:
+                if total >= RAG_MAX_CHARS:
+                    break
+                u = str(p.url or "")
+                if url_counts.get(u, 0) >= RAG_MAX_CHUNKS_PER_URL:
+                    continue
+                snippet = str(p.content or "")[:RAG_SNIPPET_CHARS]
+                if not snippet or total + len(snippet) > RAG_MAX_CHARS:
+                    continue
+                title = str(p.title or p.url or "")
+                context_parts.append(f"[{title}]\n{snippet}")
+                total += len(snippet)
+                url_counts[u] = url_counts.get(u, 0) + 1
+                sources.append(
+                    {
+                        "url": u,
+                        "title": title[:200],
+                        "cosine_distance": 0.9997,
+                    }
+                )
     for ch in ranked:
         if total >= RAG_MAX_CHARS:
             break
@@ -192,8 +229,9 @@ def _lexical_fallback_from_pages(
     if not tokens:
         return "", [], True, False
 
+    max_candidates = max(RAG_TOP_K, 12) * 5
     candidates: list[tuple[int, Page]] = []
-    for p in Page.objects.all().iterator():
+    for p in Page.objects.only("id", "url", "title", "content").iterator(chunk_size=2000):
         blob = f"{str(p.title or '')}\n{str(p.content or '')}"
         score = _word_overlap_count(blob, tokens)
         score += _word_overlap_count(str(p.url or ""), tokens) * 2
@@ -202,6 +240,8 @@ def _lexical_fallback_from_pages(
         )
         if score > 0:
             candidates.append((score, p))
+            if len(candidates) >= max_candidates:
+                break
     if not candidates:
         return "", [], True, False
 
@@ -358,16 +398,18 @@ def search_document_chunks(
     """
     Returns (context_text, sources, used_relaxed_fallback, embedding_ok).
     """
+    t0 = time.time()
     composed_query = (composed_query or "").strip()
     if not composed_query:
         return "", [], False, True
 
     variants = _embedding_variants(composed_query, raw_user_query)
     try:
+        t_emb = time.time()
         vectors = embed_texts(variants) if variants else []
+        logger.info("RAG embed: %.2fs (%d variants)", time.time() - t_emb, len(variants))
     except Exception:
-        # Embeddings unavailable (proxy/offline/model download issue):
-        # fall back to token-overlap retrieval from local DB content.
+        logger.warning("RAG embed failed, falling back to lexical search", exc_info=True)
         context, sources, relaxed, emb_ok = _lexical_fallback_from_chunks(
             composed_query, raw_user_query
         )
@@ -383,13 +425,14 @@ def search_document_chunks(
         RAG_VECTOR_CANDIDATE_POOL,
         RAG_TOP_K + RAG_VECTOR_FILL_EXTRA + 8,
     )
+
+    t_vec = time.time()
     best = _merge_best_distances(vectors, per_pool)
+    logger.info("RAG vector search: %.2fs (pool=%d)", time.time() - t_vec, per_pool)
     if not best:
         return "", [], False, True
 
-    sorted_pairs = sorted(best.items(), key=lambda x: x[1])[
-        : max(per_pool, RAG_TOP_K + RAG_VECTOR_FILL_EXTRA + 5)
-    ]
+    sorted_pairs = sorted(best.items(), key=lambda x: x[1])[:per_pool]
     pk_order = [pk for pk, _ in sorted_pairs]
     dist_map = dict(sorted_pairs)
     chunk_map = {
@@ -403,11 +446,14 @@ def search_document_chunks(
         d = dist_map[pk]
         merged_order.append((ch, d))
 
-    candidate_slice = merged_order[: RAG_VECTOR_CANDIDATE_POOL]
+    candidate_slice = merged_order[:per_pool]
     stem_intent = bool(RAG_STEM_OR_ENGINEERING_INTENT_RE.search(composed_query))
+
+    t_rerank = time.time()
     reranked = _rerank_items(
         candidate_slice, composed_query, raw_user_query, stem_query=stem_intent
     )
+    logger.info("RAG rerank: %.2fs (%d candidates)", time.time() - t_rerank, len(candidate_slice))
 
     thresh_hits = [(ch, d) for ch, d in reranked if d <= RAG_MAX_DISTANCE]
     used_relaxed = False
@@ -430,34 +476,44 @@ def search_document_chunks(
             seen_pk.add(pk)
             ranked.append((ch, nominal))
 
+    t_kw = time.time()
     if RAG_KEYWORD_BOOST and has_rows:
         stem_terms = stem_engineering_boost_terms(composed_query)
-        stem_terms = sorted(stem_terms, key=len, reverse=True)
-        for term in stem_terms:
-            for ch in DocumentChunk.objects.filter(content__icontains=term)[:6]:
+        if stem_terms:
+            q_filter = Q()
+            for term in stem_terms:
+                q_filter |= Q(content__icontains=term)
+            for ch in DocumentChunk.objects.filter(q_filter)[:len(stem_terms) * 6]:
                 push_kw(ch, 0.62)
 
-    # Broad "Faculty/Department" icontains matches almost every page — skip when user asked a specific discipline.
     if RAG_KEYWORD_BOOST and has_rows and not stem_intent:
-        struct_terms = sorted(
-            structured_list_boost_terms(composed_query), key=len, reverse=True
-        )
-        for term in struct_terms:
-            for ch in DocumentChunk.objects.filter(content__icontains=term)[:5]:
+        struct_terms = structured_list_boost_terms(composed_query)
+        if struct_terms:
+            q_filter = Q()
+            for term in struct_terms:
+                q_filter |= Q(content__icontains=term)
+            for ch in DocumentChunk.objects.filter(q_filter)[:len(struct_terms) * 5]:
                 push_kw(ch, 0.65)
 
     for ch, d in vector_block:
         push_kw(ch, float(d))
 
-    # Single-word "computer"/"engineering" icontains poisons retrieval for STEM questions.
     if RAG_KEYWORD_BOOST and has_rows and not stem_intent:
-        for term in rag_keywords_from_query(composed_query):
-            for ch in DocumentChunk.objects.filter(content__icontains=term)[:4]:
+        kw_terms = rag_keywords_from_query(composed_query)
+        if kw_terms:
+            q_filter = Q()
+            for term in kw_terms:
+                q_filter |= Q(content__icontains=term)
+            for ch in DocumentChunk.objects.filter(q_filter)[:len(kw_terms) * 4]:
                 push_kw(ch, 0.72)
+    logger.info("RAG keyword boost: %.2fs", time.time() - t_kw)
 
     primary_vec = vectors[0]
     ranked_pks = [ch.pk for ch, _ in ranked]
+
+    t_dist = time.time()
     real_dist = _cosine_distance_by_pk(ranked_pks, primary_vec)
+    logger.info("RAG cosine re-dist: %.2fs (%d pks)", time.time() - t_dist, len(ranked_pks))
 
     def _effective_sort_distance(ch: DocumentChunk, nominal: float) -> float:
         d = real_dist.get(ch.pk, float(nominal))
@@ -506,9 +562,13 @@ def search_document_chunks(
         try_add_context_chunk(chunk, dist_val)
 
     if total < RAG_MAX_CHARS and RAG_VECTOR_FILL_EXTRA > 0:
-        fill_slice = list(merged_order[RAG_TOP_K : RAG_TOP_K + RAG_VECTOR_FILL_EXTRA])
-        fill_pks = [ch.pk for ch, _ in fill_slice]
-        real_dist.update(_cosine_distance_by_pk(fill_pks, primary_vec))
+        fill_slice = [
+            (ch, d) for ch, d in reranked if ch.pk not in seen_chunk_ids
+        ][:RAG_VECTOR_FILL_EXTRA]
+        # Use existing dist_map distances instead of an extra DB query
+        for ch, _ in fill_slice:
+            if ch.pk not in real_dist:
+                real_dist[ch.pk] = dist_map.get(ch.pk, 1.0)
         fill_slice.sort(
             key=lambda it: (_effective_sort_distance(it[0], it[1]), it[0].pk)
         )
@@ -517,4 +577,5 @@ def search_document_chunks(
             if total >= RAG_MAX_CHARS:
                 break
 
+    logger.info("RAG total: %.2fs, chunks=%d, chars=%d", time.time() - t0, len(sources), total)
     return "\n\n".join(context_parts), sources, used_relaxed, True

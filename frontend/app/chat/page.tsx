@@ -48,11 +48,28 @@ const LAST_SESSION_KEY = "acu-chat-last-session-id";
 /** Stable key for the “new chat” view (not yet a server session id) */
 const DRAFT_SESSION_KEY = "__draft__";
 
+/** RFC4122 v4; works on http://IP where `crypto.randomUUID` is missing (non-secure context). */
+function newUuid(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  const bytes = new Uint8Array(16);
+  if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
+    crypto.getRandomValues(bytes);
+  } else {
+    for (let i = 0; i < 16; i++) bytes[i] = Math.floor(Math.random() * 256);
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const h = [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+
 function getOrCreateClientId(): string {
   if (typeof window === "undefined") return "";
   let id = localStorage.getItem(CLIENT_ID_KEY);
   if (!id) {
-    id = crypto.randomUUID();
+    id = newUuid();
     localStorage.setItem(CLIENT_ID_KEY, id);
   }
   return id;
@@ -71,6 +88,8 @@ export default function ChatPage() {
   const [typingElapsedSec, setTypingElapsedSec] = useState(0);
   const [historyOpen, setHistoryOpen] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesScrollRef = useRef<HTMLElement>(null);
+  const shouldAutoScrollRef = useRef(true);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const requestStartRef = useRef<number | null>(null);
   const activeIdRef = useRef<string | null>(null);
@@ -85,20 +104,24 @@ export default function ChatPage() {
   const refreshSessionList = useCallback(async () => {
     const cid = getOrCreateClientId();
     if (!cid) return;
-    const r = await fetch(
-      `${apiBase}/api/chat/sessions/?client_id=${encodeURIComponent(cid)}`
-    );
-    if (!r.ok) return;
-    const data = (await r.json()) as {
-      sessions: Array<{ id: string; title: string; updated_at: string }>;
-    };
-    setSessionList(
-      data.sessions.map((s) => ({
-        id: s.id,
-        title: s.title,
-        updatedAt: new Date(s.updated_at).getTime(),
-      }))
-    );
+    try {
+      const r = await fetch(
+        `${apiBase}/api/chat/sessions/?client_id=${encodeURIComponent(cid)}`
+      );
+      if (!r.ok) return;
+      const data = (await r.json()) as {
+        sessions: Array<{ id: string; title: string; updated_at: string }>;
+      };
+      setSessionList(
+        data.sessions.map((s) => ({
+          id: s.id,
+          title: s.title,
+          updatedAt: new Date(s.updated_at).getTime(),
+        }))
+      );
+    } catch {
+      // Backend unreachable – silently ignore
+    }
   }, [apiBase]);
 
   const loadMessages = useCallback(
@@ -137,48 +160,74 @@ export default function ChatPage() {
 
   useEffect(() => {
     let cancelled = false;
+    let backupTimer: number | null = window.setTimeout(
+      () => {
+        if (!cancelled) setHydrated(true);
+      },
+      20_000
+    );
+    const clearBackup = () => {
+      if (backupTimer != null) {
+        clearTimeout(backupTimer);
+        backupTimer = null;
+      }
+    };
+
     (async () => {
       const cid = getOrCreateClientId();
       if (cancelled) return;
       setClientId(cid);
 
-      const r = await fetch(
-        `${apiBase}/api/chat/sessions/?client_id=${encodeURIComponent(cid)}`
-      );
-      if (cancelled) return;
-      if (r.ok) {
-        const data = (await r.json()) as {
-          sessions: Array<{ id: string; title: string; updated_at: string }>;
-        };
-        const list = data.sessions.map((s) => ({
-          id: s.id,
-          title: s.title,
-          updatedAt: new Date(s.updated_at).getTime(),
-        }));
-        setSessionList(list);
+      try {
+        const r = await fetch(
+          `${apiBase}/api/chat/sessions/?client_id=${encodeURIComponent(cid)}`,
+          { signal: AbortSignal.timeout(18_000) }
+        );
+        if (cancelled) return;
+        if (r.ok) {
+          const data = (await r.json()) as {
+            sessions: Array<{ id: string; title: string; updated_at: string }>;
+          };
+          const list = data.sessions.map((s) => ({
+            id: s.id,
+            title: s.title,
+            updatedAt: new Date(s.updated_at).getTime(),
+          }));
+          setSessionList(list);
 
-        const last = localStorage.getItem(LAST_SESSION_KEY);
-        if (last && list.some((s) => s.id === last)) {
-          setActiveId(last);
-          const okLoad = await loadMessages(last);
-          if (!okLoad) {
-            setMessages([]);
+          const last = localStorage.getItem(LAST_SESSION_KEY);
+          if (last && list.some((s) => s.id === last)) {
+            setActiveId(last);
+            const okLoad = await loadMessages(last);
+            if (!okLoad) {
+              setMessages([]);
+              setActiveId(null);
+              localStorage.removeItem(LAST_SESSION_KEY);
+            }
+          } else {
             setActiveId(null);
-            localStorage.removeItem(LAST_SESSION_KEY);
+            setMessages([]);
           }
         } else {
+          setSessionList([]);
           setActiveId(null);
           setMessages([]);
         }
-      } else {
-        setSessionList([]);
-        setActiveId(null);
-        setMessages([]);
+      } catch {
+        if (!cancelled) {
+          setSessionList([]);
+          setActiveId(null);
+          setMessages([]);
+        }
       }
-      if (!cancelled) setHydrated(true);
+      if (!cancelled) {
+        clearBackup();
+        setHydrated(true);
+      }
     })();
     return () => {
       cancelled = true;
+      clearBackup();
     };
   }, [apiBase, loadMessages]);
 
@@ -201,13 +250,33 @@ export default function ChatPage() {
     [sessionList]
   );
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  const updateAutoScrollState = useCallback(() => {
+    const scroller = messagesScrollRef.current;
+    if (!scroller) return;
+    const distanceFromBottom =
+      scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+    // Consider "at bottom" within a small threshold to avoid sticky jitter.
+    shouldAutoScrollRef.current = distanceFromBottom < 64;
+  }, []);
+
+  const scrollToBottom = (behavior: ScrollBehavior = "smooth") => {
+    messagesEndRef.current?.scrollIntoView({ behavior });
   };
 
   useEffect(() => {
-    scrollToBottom();
+    if (!shouldAutoScrollRef.current) return;
+    // While waiting/typing, avoid smooth-scroll fighting with manual scroll.
+    scrollToBottom(typingForThisView ? "auto" : "smooth");
   }, [messages, activeId, typingForThisView, typingElapsedSec]);
+
+  useEffect(() => {
+    // New conversation/view switch should start pinned to bottom.
+    shouldAutoScrollRef.current = true;
+    requestAnimationFrame(() => {
+      scrollToBottom("auto");
+      updateAutoScrollState();
+    });
+  }, [activeId, updateAutoScrollState]);
 
   useEffect(() => {
     if (!typingForThisView) {
@@ -297,7 +366,7 @@ export default function ChatPage() {
     if (!clientId) setClientId(cid);
 
     const userMessage: Message = {
-      id: crypto.randomUUID(),
+      id: newUuid(),
       role: "user",
       content: trimmed,
       timestamp: new Date(),
@@ -310,16 +379,9 @@ export default function ChatPage() {
     setLoadingSessionKey(requestOwnerKey);
     setIsLoading(true);
 
-    const chatTimeoutMs = Number(
-      process.env.NEXT_PUBLIC_CHAT_TIMEOUT_MS ?? "200000"
-    );
     const controller = new AbortController();
     activeChatAbortRef.current = controller;
     abortReasonRef.current = null;
-    const timeoutId = window.setTimeout(() => {
-      abortReasonRef.current = "timeout";
-      controller.abort();
-    }, chatTimeoutMs);
 
     const body: Record<string, string> = {
       client_id: cid,
@@ -366,14 +428,13 @@ export default function ChatPage() {
           userCancelled = true;
           replyText = "Response generation was stopped.";
         } else {
-          replyText = `No response within ${Math.round(chatTimeoutMs / 1000)} seconds.`;
+          replyText = "Request was aborted before completion.";
         }
       } else {
         replyText =
           "Could not connect. Check NEXT_PUBLIC_API_URL and that the backend is running.";
       }
     } finally {
-      window.clearTimeout(timeoutId);
       activeChatAbortRef.current = null;
       abortReasonRef.current = null;
     }
@@ -389,7 +450,7 @@ export default function ChatPage() {
         setMessages((prev) => [
           ...prev,
           {
-            id: crypto.randomUUID(),
+            id: newUuid(),
             role: "assistant",
             content: replyText,
             timestamp: new Date(),
@@ -411,7 +472,7 @@ export default function ChatPage() {
           setMessages((prev) => [
             ...prev,
             {
-              id: crypto.randomUUID(),
+              id: newUuid(),
               role: "assistant",
               content: replyText,
               timestamp: new Date(),
@@ -444,7 +505,7 @@ export default function ChatPage() {
       }
     } else if (stillOnSentView()) {
       const assistantMessage: Message = {
-        id: crypto.randomUUID(),
+        id: newUuid(),
         role: "assistant",
         content: replyText,
         timestamp: new Date(),
@@ -624,7 +685,11 @@ export default function ChatPage() {
             </div>
 
             <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-              <main className="min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-8">
+              <main
+                ref={messagesScrollRef}
+                onScroll={updateAutoScrollState}
+                className="min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-8"
+              >
                 {messages.length === 0 ? (
                   <div className="flex h-full min-h-[42vh] flex-col items-center justify-center gap-5 text-center">
                     <div className="flex h-20 w-20 items-center justify-center rounded-3xl bg-gradient-to-br from-cyan-500/20 to-blue-500/15 ring-1 ring-white/40">
@@ -740,7 +805,11 @@ export default function ChatPage() {
                                     {msg.rag.sources.map((s, i) => (
                                       <li key={`${s.url}-${i}`}>
                                         <a
-                                          href={s.url}
+                                          href={
+                                            s.url && /^https?:\/\//i.test(s.url)
+                                              ? s.url
+                                              : "#"
+                                          }
                                           target="_blank"
                                           rel="noopener noreferrer"
                                           className="font-medium text-cyan-700 underline decoration-cyan-700/30 underline-offset-2 hover:text-cyan-600"
@@ -840,7 +909,7 @@ export default function ChatPage() {
                       }}
                       placeholder="Type your message…"
                       rows={1}
-                      className="w-full resize-none rounded-2xl border border-white/50 bg-white/70 px-4 py-3.5 pr-12 text-[15px] text-[#0b2e3b] placeholder:text-[#0b2e3b]/40 outline-none transition focus:border-cyan-300/60 focus:ring-2 focus:ring-cyan-300/30"
+                      className="chat-input w-full resize-none rounded-2xl border border-white/50 bg-white/70 px-4 py-3.5 pr-12 text-[15px] text-[#0b2e3b] placeholder:text-[#0b2e3b]/40 outline-none transition focus:border-cyan-300/60 focus:ring-2 focus:ring-cyan-300/30"
                       disabled={typingForThisView}
                     />
 
@@ -850,7 +919,7 @@ export default function ChatPage() {
                         onClick={stopGeneration}
                         title="Stop"
                         aria-label="Stop generating response"
-                        className="absolute bottom-2.5 right-2.5 flex h-9 w-9 items-center justify-center rounded-lg border border-[#0b2e3b]/20 bg-[#0b2e3b] text-white shadow-lg transition hover:bg-[#0a2530] focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/80"
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 flex h-9 w-9 items-center justify-center rounded-lg border border-[#0b2e3b]/20 bg-[#0b2e3b] text-white shadow-lg transition hover:bg-[#0a2530] focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/80"
                       >
                         <svg
                           className="h-3.5 w-3.5"
@@ -872,7 +941,7 @@ export default function ChatPage() {
                       <button
                         type="submit"
                         disabled={!input.trim()}
-                        className="absolute bottom-2.5 right-2.5 flex h-9 w-9 items-center justify-center rounded-xl bg-cyan-600 text-white shadow-lg shadow-cyan-600/20 transition hover:bg-cyan-500 disabled:pointer-events-none disabled:opacity-40"
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 flex h-9 w-9 items-center justify-center rounded-xl bg-cyan-600 text-white shadow-lg shadow-cyan-600/20 transition hover:bg-cyan-500 disabled:pointer-events-none disabled:opacity-40"
                         aria-label="Send"
                       >
                         <svg

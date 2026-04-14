@@ -13,6 +13,7 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 import os
 from pathlib import Path
 
+from django.core.management.utils import get_random_secret_key
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -23,15 +24,33 @@ load_dotenv(BASE_DIR.parent / ".env")
 # See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = os.environ.get(
-    "SECRET_KEY",
-    "django-insecure-or7siy*)0_r(%y5w!zebc0$=x4%myhp9k%(l&6jkr=wr)u893a",
-)
+SECRET_KEY = os.environ.get("SECRET_KEY", "")
+if not SECRET_KEY:
+    DEBUG = os.environ.get("DEBUG", "False").lower() in ("1", "true", "yes")
+    if DEBUG:
+        SECRET_KEY = get_random_secret_key()
+    else:
+        raise RuntimeError(
+            "SECRET_KEY environment variable is required in production. "
+            "Generate one with: python -c \"from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())\""
+        )
+else:
+    # SECURITY WARNING: don't run with debug turned on in production!
+    DEBUG = os.environ.get("DEBUG", "False").lower() in ("1", "true", "yes")
 
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+ALLOWED_HOSTS = [
+    h.strip()
+    for h in os.environ.get("ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")
+    if h.strip()
+]
 
-ALLOWED_HOSTS = os.environ.get("ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")
+_wh_flag = os.environ.get("DJANGO_WHITENOISE", "auto").lower()
+if _wh_flag == "auto":
+    USE_WHITENOISE = not DEBUG
+elif _wh_flag in ("1", "true", "yes"):
+    USE_WHITENOISE = True
+else:
+    USE_WHITENOISE = False
 
 
 # Application definition
@@ -45,20 +64,44 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'django.contrib.postgres',
     'corsheaders',
+    'rest_framework',
+    'drf_spectacular',
     'core',
     'chat',
 ]
 
+REST_FRAMEWORK = {
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+}
+
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'ACU Smart Assistant API',
+    'DESCRIPTION': 'AI-powered university chatbot API with RAG-based retrieval',
+    'VERSION': '1.0.0',
+    'SERVE_INCLUDE_SCHEMA': False,
+}
+
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
-    'corsheaders.middleware.CorsMiddleware',
-    'django.contrib.sessions.middleware.SessionMiddleware',
-    'django.middleware.common.CommonMiddleware',
-    'django.middleware.csrf.CsrfViewMiddleware',
-    'django.contrib.auth.middleware.AuthenticationMiddleware',
-    'django.contrib.messages.middleware.MessageMiddleware',
-    'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
+if USE_WHITENOISE:
+    MIDDLEWARE.append('whitenoise.middleware.WhiteNoiseMiddleware')
+MIDDLEWARE.extend(
+    [
+        'corsheaders.middleware.CorsMiddleware',
+        'django.contrib.sessions.middleware.SessionMiddleware',
+        'django.middleware.common.CommonMiddleware',
+        'django.middleware.csrf.CsrfViewMiddleware',
+        'django.contrib.auth.middleware.AuthenticationMiddleware',
+        'django.contrib.messages.middleware.MessageMiddleware',
+        'django.middleware.clickjacking.XFrameOptionsMiddleware',
+        'chat.middleware.RateLimitMiddleware',
+    ]
+)
+
+# Rate limiting
+RATE_LIMIT_REQUESTS = int(os.environ.get("RATE_LIMIT_REQUESTS", "30"))
+RATE_LIMIT_WINDOW = int(os.environ.get("RATE_LIMIT_WINDOW", "60"))
 
 ROOT_URLCONF = 'config.urls'
 
@@ -129,7 +172,46 @@ USE_TZ = True
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 
-STATIC_URL = 'static/'
+STATIC_URL = "static/"
+STATIC_ROOT = BASE_DIR / "staticfiles"
+
+if USE_WHITENOISE:
+    STORAGES = {
+        "default": {
+            "BACKEND": "django.core.files.storage.FileSystemStorage",
+        },
+        "staticfiles": {
+            "BACKEND": "whitenoise.storage.CompressedStaticFilesStorage",
+        },
+    }
+
+# Logging
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "verbose": {
+            "format": "[{asctime}] {levelname} {name}: {message}",
+            "style": "{",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "verbose",
+        },
+    },
+    "loggers": {
+        "chat": {
+            "handlers": ["console"],
+            "level": os.environ.get("LOG_LEVEL", "INFO"),
+        },
+        "core": {
+            "handlers": ["console"],
+            "level": os.environ.get("LOG_LEVEL", "INFO"),
+        },
+    },
+}
 
 # Browser chat (Next.js) → Django API
 CORS_ALLOWED_ORIGINS = [
@@ -149,3 +231,19 @@ CSRF_TRUSTED_ORIGINS = [
     "http://localhost:3001",
     "http://127.0.0.1:3001",
 ]
+CSRF_TRUSTED_ORIGINS.extend(
+    [
+        x.strip()
+        for x in os.environ.get("CSRF_TRUSTED_ORIGINS_EXTRA", "").split(",")
+        if x.strip()
+    ]
+)
+
+# Canlı ortam: farklı subdomain veya ayrı frontend domain (ör. https://app.site.com)
+CORS_ALLOWED_ORIGINS.extend(
+    [
+        x.strip()
+        for x in os.environ.get("CORS_ALLOWED_ORIGINS_EXTRA", "").split(",")
+        if x.strip()
+    ]
+)
