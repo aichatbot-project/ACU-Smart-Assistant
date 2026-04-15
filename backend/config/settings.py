@@ -26,7 +26,9 @@ load_dotenv(BASE_DIR.parent / ".env")
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.environ.get("SECRET_KEY", "")
 if not SECRET_KEY:
-    DEBUG = os.environ.get("DEBUG", "False").lower() in ("1", "true", "yes")
+    # No SECRET_KEY: default to dev mode so manage.py works without a .env file.
+    # Production must set SECRET_KEY (then DEBUG defaults to false below).
+    DEBUG = os.environ.get("DEBUG", "true").lower() in ("1", "true", "yes")
     if DEBUG:
         SECRET_KEY = get_random_secret_key()
     else:

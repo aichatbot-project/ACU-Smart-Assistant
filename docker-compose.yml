@@ -65,6 +65,8 @@ services:
       sh -c "python manage.py migrate --noinput &&
              python manage.py runserver 0.0.0.0:8000"
     environment:
+      # Required if DEBUG is false; keeps local Docker working when .env omits both.
+      SECRET_KEY: ${SECRET_KEY:-django-insecure-dev-only-change-for-production}
       POSTGRES_USER: ${POSTGRES_USER:-acu}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-acu_secret}
       POSTGRES_DB: ${POSTGRES_DB:-acu_chatbot}
@@ -74,10 +76,13 @@ services:
       CSRF_TRUSTED_ORIGINS_EXTRA: ${CSRF_TRUSTED_ORIGINS_EXTRA:-http://localhost:8080,http://127.0.0.1:8080}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2:3b}
-      # Smaller ctx / predict = faster replies on CPU (raise via .env if quality drops).
-      OLLAMA_NUM_PREDICT: ${OLLAMA_NUM_PREDICT:-200}
+      # Tighter predict + same ctx: faster CPU generation; tune via .env.
+      OLLAMA_NUM_PREDICT: ${OLLAMA_NUM_PREDICT:-180}
       OLLAMA_NUM_CTX: ${OLLAMA_NUM_CTX:-4096}
       OLLAMA_HTTP_TIMEOUT: ${OLLAMA_HTTP_TIMEOUT:-120}
+      CHAT_HISTORY_MAX_MESSAGES: ${CHAT_HISTORY_MAX_MESSAGES:-6}
+      RAG_TOP_K: ${RAG_TOP_K:-8}
+      RAG_MAX_CHARS: ${RAG_MAX_CHARS:-1800}
       DEBUG: ${DEBUG:-true}
       LLM_BACKEND: ${LLM_BACKEND:-ollama}
     ports:

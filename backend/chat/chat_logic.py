@@ -15,7 +15,8 @@ from .rag_service import (
     rag_query_from_request_body,
 )
 
-CHAT_HISTORY_MAX_MESSAGES = max(1, int(os.environ.get("CHAT_HISTORY_MAX_MESSAGES", "12")))
+# Fewer prior turns = smaller prompt = faster CPU inference (override via env if needed).
+CHAT_HISTORY_MAX_MESSAGES = max(1, int(os.environ.get("CHAT_HISTORY_MAX_MESSAGES", "6")))
 
 
 def run_chat_completion(body: dict) -> JsonResponse:
